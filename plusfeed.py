@@ -387,7 +387,9 @@ class MainPage(webapp.RequestHandler):
 
 			def entitydecode(match, uchr=uchr):
 				entity = match.group(1)
-				if entity.startswith('#x'):
+				if entity is None:
+					return match.group(0);
+				elif entity.startswith('#x'):
 					return uchr(int(entity[2:], 16))
 				elif entity.startswith('#'):
 					return uchr(int(entity[1:]))
