@@ -305,7 +305,7 @@ class MainPage(webapp.RequestHandler):
 					
 					if post[66]:
 						
-						if post[66][0][1]:						
+						if post[66][0][3]:						
 							desc = desc + ' <br/><br/><a href="' + post[66][0][1] + '">' + post[66][0][3] + '</a>'
 
 						if post[66][0][6]:
