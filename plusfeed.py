@@ -26,15 +26,17 @@ allurls = re.compile(r'/(.*)')
 idurls = re.compile(r'[0-9]+')
 remtags = re.compile(r'<.*?>')
 remspaces = re.compile(r'\s+')
-commas = re.compile(',,',re.M)
-se_break = re.compile('[.!?:]\s+', re.VERBOSE)
+se_break = re.compile('\S+', re.VERBOSE)
 charrefpat = re.compile(r'&(#(\d+|x[\da-fA-F]+)|[\w.:-]+);?')
+six_periods = re.compile("\.?\.?\.\.\.\.$")
 
 
 HTTP_DATE_FMT = "%a, %d %b %Y %H:%M:%S GMT"
 ATOM_DATE = "%Y-%m-%dT%H:%M:%SZ"
-ENABLE_CACHE=True
 MAX_POSTS = 10
+ENABLE_CACHE=True
+# https://plus.google.com/104961845171318028721/posts/QqA4E2uHx3w
+MAX_TITLE_LENGTH=75
 
 homepagetext = """
 	<html>
@@ -235,7 +237,8 @@ class MainPage(webapp.RequestHandler):
 			
 					result = urlfetch.fetch(url, deadline=10)
 			
-				except urlfetch.Error:
+
+				except urlfetch.Error, err:
 					self.error(500)
 					out.write('<h1>500 Server Error</h1><p>' + str(err) + '</p>')
 					logging.error(err)
@@ -244,14 +247,16 @@ class MainPage(webapp.RequestHandler):
 			if result.status_code == 200:
 
 				base_url = self.request.application_url
-				txt = result.content
-				txt = txt[5:]
-				txt = commas.sub(',null,',txt)
-				txt = commas.sub(',null,',txt)
-				txt = txt.replace('[,','[null,')
-				txt = txt.replace(',]',',null]')
-				obj = json.loads(txt)
-				
+				txt = cleanGoogleJSON(result.content)
+
+				try:
+					obj = json.loads(txt)
+				except json.JSONDecodeError, err:
+					logging.debug('JSON Decoding Error')
+					self.error(500)
+					out.write('<h1>500 Server Error</h1><p>There was an error decoding the JSON object from Google</p>')
+					return
+			
 				posts = obj[0][1][0]
 
 				if not posts:
@@ -307,7 +312,7 @@ class MainPage(webapp.RequestHandler):
 					
 					if post[66]:
 						
-						if post[66][0][1]:						
+						if post[66][0][3]:						
 							desc = desc + ' <br/><br/><a href="' + post[66][0][1] + '">' + post[66][0][3] + '</a>'
 
 						if post[66][0][6]:
@@ -322,22 +327,16 @@ class MainPage(webapp.RequestHandler):
 					if desc == '':
 						desc = permalink					
 					
-					
-					ptitle = self.htmldecode(desc)
+
+					ptitle = desc
 					ptitle = remtags.sub(' ', ptitle)
 					ptitle = remspaces.sub(' ', ptitle)
+					ptitle = self.htmldecode(ptitle)
 					
-					sentend = 75
-					
-					m = se_break.split(ptitle)
-					if m:
-						sentend = len(m[0]) + 1
-					
-					if sentend < 5 or sentend > 75:
-						sentend = 75
+					ptitle = self.abbreviate(ptitle)
 
 					feed += '<entry>\n'
-					feed += '<title>' + escape(ptitle[:sentend]) + '</title>\n'
+					feed += '<title>' + escape(ptitle) + '</title>\n'
 					feed += '<link href="' + permalink + '" rel="alternate"></link>\n'
 					feed += '<published>' + dt.strftime(ATOM_DATE) + '</published>\n'
 					feed += '<updated>' + dt.strftime(ATOM_DATE) + '</updated>\n'
@@ -380,6 +379,25 @@ class MainPage(webapp.RequestHandler):
 
 
 
+	def abbreviate(self, title):
+		# leave space for elipses
+		end_at = MAX_TITLE_LENGTH - 3
+		max_length = MAX_TITLE_LENGTH - 3
+		for match in se_break.finditer(title):
+			# print str(match.start(0)) + " TO " + str(match.end(0))
+			if (match.end(0) < max_length):
+				end_at = match.end(0)
+				continue			
+			break
+
+		abbreviation = title[:end_at]
+		if (len(abbreviation) < len(title)):
+			abbreviation += "..."			
+			abbreviation = six_periods.sub("...", abbreviation)
+
+		return abbreviation
+
+
 	def htmldecode(self, text):
 
 			if type(text) is unicode:
@@ -390,7 +408,10 @@ class MainPage(webapp.RequestHandler):
 
 			def entitydecode(match, uchr=uchr):
 				entity = match.group(1)
-				if entity.startswith('#x'):
+
+				if entity is None:
+					return match.group(0);
+				elif entity.startswith('#x'):
 					return uchr(int(entity[2:], 16))
 				elif entity.startswith('#'):
 					return uchr(int(entity[1:]))
@@ -404,6 +425,73 @@ class MainPage(webapp.RequestHandler):
 
 ####
 
+
+def cleanGoogleJSON(json):
+	instring = False
+	inescape = False
+	inlabel = False
+	txt = lastchar = ''
+	
+	for char in json[5:]:
+		if not instring and re.match("\s", char):
+			continue
+
+		if instring:
+			if inescape:
+				txt += char
+				inescape = False
+
+			elif char == '\\':
+				txt += char
+				inescape = True
+
+			elif char == "\"":
+				txt += char
+				instring = False
+			else:
+				txt += char
+
+			lastchar = char
+			continue
+
+		if inlabel:
+			if char == ":":
+				txt += "\""
+				inlabel = False
+			txt += char
+			lastchar = char
+			continue
+
+
+		# Add the missing nulls
+		if char == "\"":
+			txt += char
+			instring = True
+
+		elif char == ",":
+			if lastchar == "," or lastchar == "[" or lastchar == "{":
+				txt += "null"
+			txt += char
+
+		elif char == "]" or char == "}":
+			if lastchar == ",":
+				txt += "null"
+			txt += char
+
+		elif re.match("\d", char):
+			if lastchar == "{":
+				txt += "\""
+				inlabel = True
+			txt += char
+
+		else:
+			txt += char
+
+		lastchar = char
+
+	return txt
+
+
 application = webapp.WSGIApplication([(r'/(.*)', MainPage)],debug=True)
 
 def main():
@@ -411,5 +499,4 @@ def main():
 
 if __name__ == "__main__":
 	main()
-	
-	
+
